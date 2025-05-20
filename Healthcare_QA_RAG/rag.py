@@ -16,14 +16,14 @@ load_dotenv()  # .env 파일에서 환경변수 로드
 
 #cache_resource로 한번 실행한 결과 캐싱해두기
 @st.cache_resource
-def load_and_split_pdf(file_path):
+def load_pdf(file_path):
     loader = PyPDFLoader(file_path)
-    return loader.load_and_split()
+    return loader.load()
 
 #텍스트 청크들을 Chroma 안에 임베딩 벡터로 저장
 @st.cache_resource
 def create_vector_store(_docs):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=50)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     split_docs = text_splitter.split_documents(_docs)
 
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
@@ -46,8 +46,8 @@ def get_vectorstore(_docs):
 # PDF 문서 로드-벡터 DB 저장-검색기-히스토리 모두 합친 Chain 구축
 @st.cache_resource
 def initialize_components(selected_model):
-    file_path = r"who.pdf"
-    pages = load_and_split_pdf(file_path)
+    file_path = "who.pdf"
+    pages = load_pdf(file_path)
     vectorstore = get_vectorstore(pages)
     retriever = vectorstore.as_retriever()
 
@@ -122,4 +122,6 @@ if prompt_message := st.chat_input("Your question"):
             st.write(answer)
             with st.expander("참고 문서 확인"):
                 for doc in response['context']:
-                    st.markdown(doc.metadata['source'], help=doc.page_content)
+                        preview = doc.page_content.strip().replace("\n", " ")[:500]
+                        source = doc.metadata.get("display_source", doc.metadata.get("source", "알 수 없음"))
+                        st.markdown(f"📄 **{source}**\n\n{preview}...")
