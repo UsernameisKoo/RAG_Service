@@ -16,9 +16,9 @@ load_dotenv() # .env 파일에서 환경변수 로드
 
 #cache_resource로 한번 실행한 결과 캐싱해두기
 @st.cache_resource
-def load_and_split_pdf(file_path):
+def load_pdf(file_path):
     loader = PyPDFLoader(file_path)
-    return loader.load_and_split()
+    return loader.load()
 
 #텍스트 청크들을 FAISS 안에 임베딩 벡터로 저장
 @st.cache_resource
@@ -47,7 +47,7 @@ def get_vectorstore(_docs):
 @st.cache_resource
 def initialize_components(selected_model):
     file_path = r"./data/대한민국헌법(헌법)(제00010호)(19880225).pdf"
-    pages = load_and_split_pdf(file_path)
+    pages = load_pdf(file_path)
     vectorstore = get_vectorstore(pages)
     retriever = vectorstore.as_retriever()
 
