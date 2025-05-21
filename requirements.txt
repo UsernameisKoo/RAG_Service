@@ -8,3 +8,4 @@ python-dotenv
 openai
 tiktoken
 PyPDF2
+pypdf
