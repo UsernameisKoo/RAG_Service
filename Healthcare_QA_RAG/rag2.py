@@ -12,25 +12,36 @@ def load_pdf(file_path):
     loader = PyPDFLoader(file_path)
     return loader.load()
 
-def create_vector_store(_docs):
+def create_vector_store(_docs, index_name):  # index_name 인자 추가
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     split_docs = text_splitter.split_documents(_docs)
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = FAISS.from_documents(split_docs, embeddings)
-    vectorstore.save_local("faiss_index")
+    vectorstore.save_local(f"faiss_index/{index_name}")  # 인덱스를 PDF 이름 기반으로 저장
     return vectorstore
 
-def get_vectorstore(_docs):
-    if os.path.exists("faiss_index/index.faiss"):
+def get_vectorstore(_docs, index_name):
+    path = f"faiss_index/{index_name}/index.faiss"
+    if os.path.exists(path):
         embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+        return FAISS.load_local(f"faiss_index/{index_name}", embeddings, allow_dangerous_deserialization=True)
     else:
-        return create_vector_store(_docs)
+        return create_vector_store(_docs, index_name)
 
-def initialize_rag_chain(pdf_path):
-    pages = load_pdf(pdf_path)
-    vectorstore = get_vectorstore(pages)
+def initialize_rag_chain(*pdf_paths):
+    all_pages = []
+    for path in pdf_paths:
+        pages = load_pdf(path)
+        all_pages.extend(pages)  # 문서 리스트를 병합
+
+    # PDF 파일명을 합쳐 인덱스 이름 생성 (순서 고려)
+    index_name = "_".join([
+        os.path.splitext(os.path.basename(path))[0] for path in pdf_paths
+    ])
+
+    vectorstore = get_vectorstore(all_pages, index_name)
     retriever = vectorstore.as_retriever()
+
 
     contextualize_q_system_prompt = """Given a chat history and the latest user question \
     which might reference context in the chat history, formulate a standalone question \

@@ -2,7 +2,87 @@ import streamlit as st
 import streamlit.components.v1 as components
 from langchain_core.runnables import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
-from rag2 import initialize_rag_chain
+import os
+from langchain_community.document_loaders import PyPDFLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_community.vectorstores import FAISS
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_core.runnables.history import RunnableWithMessageHistory
+
+@st.cache_resource
+def load_pdf(file_path):
+    loader = PyPDFLoader(file_path)
+    return loader.load()
+
+@st.cache_resource
+def create_vector_store(_docs, index_name):  # index_name 인자 추가
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    split_docs = text_splitter.split_documents(_docs)
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    vectorstore = FAISS.from_documents(split_docs, embeddings)
+    vectorstore.save_local(f"faiss_index/{index_name}")  # 인덱스를 PDF 이름 기반으로 저장
+    return vectorstore
+
+@st.cache_resource
+def get_vectorstore(_docs, index_name):
+    path = f"faiss_index/{index_name}/index.faiss"
+    if os.path.exists(path):
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+        return FAISS.load_local(f"faiss_index/{index_name}", embeddings, allow_dangerous_deserialization=True)
+    else:
+        return create_vector_store(_docs, index_name)
+
+@st.cache_resource
+def initialize_rag_chain(*pdf_paths):
+    all_pages = []
+    for path in pdf_paths:
+        pages = load_pdf(path)
+        all_pages.extend(pages)  # 문서 리스트를 병합
+
+    # PDF 파일명을 합쳐 인덱스 이름 생성 (순서 고려)
+    index_name = "_".join(sorted([
+    os.path.splitext(os.path.basename(path))[0] for path in pdf_paths]))
+
+    vectorstore = get_vectorstore(all_pages, index_name)
+    retriever = vectorstore.as_retriever()
+
+
+    contextualize_q_system_prompt = """Given a chat history and the latest user question \
+    which might reference context in the chat history, formulate a standalone question \
+    which can be understood without the chat history. Do NOT answer the question, \
+    just reformulate it if needed and otherwise return it as is."""
+
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("history"),
+        ("human", "{input}")
+    ])
+
+    qa_system_prompt = """You are an assistant for question-answering tasks. \
+    Use the following pieces of retrieved context to answer the question. \
+    If you don't know the answer, just say that you don't know. \
+    Keep the answer perfect. \
+    대답은 한국어로 하고, 존댓말을 써주세요.\
+
+    {context}"""
+
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", qa_system_prompt),
+        MessagesPlaceholder("history"),
+        ("human", "{input}")
+    ])
+
+    llm = ChatOpenAI(model="gpt-4o-mini")
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+    return rag_chain
+
+#####################################################################################################################
 
 if "page" not in st.session_state:
     st.session_state["page"] = "home"
@@ -131,14 +211,10 @@ def sidebar_menu():
                 const contextMenu = document.createElement("div");
                 contextMenu.id = menu_id;
                 contextMenu.className = "chat-context-menu";
-                contextMenu.innerHTML = 
-                    '<div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: \\'RENAME_CHAT\\', chat_id: \\''
-                    + chat_id + 
-                    '\\' }, \\'*\\')">이름 바꾸기</div>'
-                    + '<div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: \\'DELETE_CHAT\\', chat_id: \\''
-                    + chat_id + 
-                    '\\' }, \\'*\\')">삭제</div>';
-
+                contextMenu.innerHTML = `
+                    <div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: 'RENAME_CHAT', chat_id: '${chat_id}' }, '*')">이름 바꾸기</div>
+                    <div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: 'DELETE_CHAT', chat_id: '${chat_id}' }, '*')">삭제</div>
+                `;
                 chatListDiv.appendChild(chatItem);
                 chatListDiv.appendChild(contextMenu);
             });
@@ -168,78 +244,6 @@ def sidebar_menu():
         </script>
         """, height=500)
 
-        st.markdown("""
-            <div id="chat_list_container"></div>
-            <script>
-            function loadChatList() {
-                const chats = JSON.parse(localStorage.getItem("chat_list") || "[]");
-                const chatListDiv = document.getElementById("chat_list_container");
-                chatListDiv.innerHTML = "";
-                    
-                if (chats.length === 0) {
-                    chatListDiv.innerHTML = "<p style='color: #999; font-size: 14px; text-align: center; margin-top: 0.5rem;'>저장된 채팅이 없습니다.</p>";
-                    return;
-                }
-
-                chats.forEach((chat, i) => {
-                    const chat_id = chat.id;
-                    const chat_name = chat.name;
-                    const menu_id = "menu_" + chat_id;
-
-                    const chatItem = document.createElement("div");
-                    chatItem.className = "chat-list-item";
-                    chatItem.onclick = () => window.parent.postMessage({ type: 'SELECT_CHAT', chat_id: chat_id }, '*');
-
-                    const chatNameSpan = document.createElement("span");
-                    chatNameSpan.textContent = chat_name;
-
-                    const moreButton = document.createElement("button");
-                    moreButton.className = "chat-more-button";
-                    moreButton.textContent = "⋯";
-                    moreButton.onclick = (event) => {
-                        event.stopPropagation();
-                        toggleContextMenu(menu_id);
-                    };
-
-                    chatItem.appendChild(chatNameSpan);
-                    chatItem.appendChild(moreButton);
-
-                    const contextMenu = document.createElement("div");
-                    contextMenu.id = menu_id;
-                    contextMenu.className = "chat-context-menu";
-                    contextMenu.innerHTML = `
-                        <div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: 'RENAME_CHAT', chat_id: '${chat_id}' }, '*')">이름 바꾸기</div>
-                        <div class="chat-context-menu-item" onclick="window.parent.postMessage({ type: 'DELETE_CHAT', chat_id: '${chat_id}' }, '*')">삭제</div>
-                    `;
-
-                    chatListDiv.appendChild(chatItem);
-                    chatListDiv.appendChild(contextMenu);
-                });
-            }
-
-            function toggleContextMenu(id) {
-                var menus = document.querySelectorAll('.chat-context-menu');
-                menus.forEach(menu => {
-                    if (menu.id === id) {
-                        menu.classList.toggle('show');
-                    } else {
-                        menu.classList.remove('show');
-                    }
-                });
-            }
-
-            document.addEventListener('click', function(event) {
-                if (!event.target.matches('.chat-more-button')) {
-                    var menus = document.querySelectorAll('.chat-context-menu');
-                    menus.forEach(menu => {
-                        menu.classList.remove('show');
-                    });
-                }
-            });
-
-            setTimeout(loadChatList, 100);
-            </script>
-        """, unsafe_allow_html=True)
 
         st.markdown("<hr style='margin: 0.5rem 0 1.5rem 0;'>", unsafe_allow_html=True)
 
@@ -327,8 +331,9 @@ def show_chat():
         </style>
     """, unsafe_allow_html=True)
 
-    pdf_path = "./who.pdf"
-    rag_chain = initialize_rag_chain(pdf_path)
+    pdf_path1 = "./who.pdf"
+    pdf_path2 = "./Healthcare_Vocab.pdf"
+    rag_chain = initialize_rag_chain(pdf_path1, pdf_path2)
 
     chat_history = StreamlitChatMessageHistory(key="chat_messages")
 
@@ -377,6 +382,7 @@ def show_chat():
 
 def show_pdf_view():
     st.header("📄 PDF 보기")
+    st.markdown("<hr>", unsafe_allow_html=True)
     reference_links = [
         {
             "name": "WHO model formulary 2008",
@@ -393,7 +399,8 @@ def show_pdf_view():
     ]
 
     for ref in reference_links:
-        st.markdown(f"- [{ref['name']}]({ref['url']})", unsafe_allow_html=True)
+        st.markdown(f"<h2 style='font-size:1.5rem;'>🔗 <a href='{ref['url']}' target='_blank'>{ref['name']}</a></h2>", unsafe_allow_html=True)
+
 
 def show_login():
     st.header("🔐 로그인 페이지")
