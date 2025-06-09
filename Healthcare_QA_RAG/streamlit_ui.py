@@ -360,7 +360,8 @@ def show_chat():
         </style>
     """, unsafe_allow_html=True)
 
-    pdf_path = "./who.pdf"
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    pdf_path = os.path.join(BASE_DIR, "who.pdf")
     rag_chain = initialize_rag_chain(pdf_path)
 
     chat_history = StreamlitChatMessageHistory(key="chat_messages")
