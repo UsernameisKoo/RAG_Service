@@ -98,26 +98,27 @@ def initialize_rag_chain(pdf_path):
 ---------------
 [출력 형식 예시]
 
-✅ [핵심 답변 문장]
+✅ **핵심 답변 문장**
 
-📌 [개념 및 특징 설명]
+📌 **개념 및 특징 설명**
 
-1️⃣ [내용 분류 1]  
+1️⃣ **내용 분류 1**  
 - 내용
 
-2️⃣ [내용 분류 2]  
+2️⃣ **내용 분류 2**  
 - 내용
 
-3️⃣ [내용 분류 3]  
+3️⃣ **내용 분류 3**  
 - 내용
 
-ℹ️ [추가 주의사항/정보]  
+ℹ️ **추가 주의사항/정보**
 - 내용
 
-✔️ [마무리 멘트]
+✔️ **마무리 멘트**
 - 내용
 -----------------------
 규칙:
+- 마크다운 문법을 정확히 사용할 것 (`**굵은 글씨**`, `- 리스트` 등)
 - **한국어로**, **존댓말**을 사용하여 정중하게 대답하세요.
 - 단, 의학 용어의 경우, 한국어로 답하되, 괄호를 치고 그 안에 대응되는 영어 의료 단어를 적으시오. ex) 모르핀(morphine)
 - 예외적으로 의학 용어가 한국에서 일반적으로 영어로 표기되는 경우 이는 영어(한국어) 순으로 적으시오. ex) DMARDs(질병 수정 항류머티즘 약물) 
@@ -364,14 +365,7 @@ def show_chat():
 
     chat_history = StreamlitChatMessageHistory(key="chat_messages")
 
-    conversational_rag_chain = RunnableWithMessageHistory(
-        rag_chain,
-        lambda session_id: chat_history,
-        input_messages_key="input",
-        history_messages_key="history",
-        output_messages_key="answer",
-    )
-
+    
     if "messages" not in st.session_state or st.session_state["messages"] == []:
         st.session_state["messages"] = [{
             "role": "assistant",
@@ -380,6 +374,8 @@ def show_chat():
         if "first_question" in st.session_state:
             prompt_message = st.session_state.pop("first_question")
             if prompt_message:
+                # 0. 대화 기록에 "한국어 질문" 수동 저장
+                chat_history.add_user_message(prompt_message)       # 한국어 질문
                 st.chat_message("human").write(prompt_message)
 
             with st.chat_message("ai"):
@@ -391,11 +387,9 @@ def show_chat():
                     translated_input = translated['text']  # 영어 질문
 
                     # 2. 영어 질문 → 문서 기반 QA 수행 (답변은 한국어로 생성됨)
-                    response = conversational_rag_chain.invoke(
-                        {"input": translated_input},
-                        config
-                    )
+                    response = rag_chain.invoke({"input": translated_input, "history": [] })
                     answer = response['answer']
+                    chat_history.add_ai_message(response["answer"])     # 한국어 응답
                     st.write(answer)
 
                     with st.expander("참고 문서 확인"):
@@ -409,6 +403,8 @@ def show_chat():
     
     prompt_message = st.chat_input("질문을 입력하세요", key="chat_input_chat")
     if prompt_message:
+        # 0. 기록
+        chat_history.add_user_message(prompt_message)
         st.chat_message("human").write(prompt_message)
 
         with st.chat_message("ai"):
@@ -420,11 +416,9 @@ def show_chat():
                 translated_input = translated['text']  # 영어 질문
 
                 # 2. 영어 질문 → 문서 기반 QA 수행 (답변은 한국어로 생성됨)
-                response = conversational_rag_chain.invoke(
-                    {"input": translated_input},
-                    config
-                )
+                response = rag_chain.invoke({"input": translated_input, "history": [] })
                 answer = response['answer']
+                chat_history.add_ai_message(response["answer"])     # 한국어 응답
                 st.write(answer)
 
                 with st.expander("참고 문서 확인"):
