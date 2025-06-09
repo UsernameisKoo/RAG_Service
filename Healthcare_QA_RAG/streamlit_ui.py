@@ -1,8 +1,5 @@
-import streamlit as st
-import streamlit.components.v1 as components
-from langchain_core.runnables import RunnableWithMessageHistory
-from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 import os
+import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
@@ -11,6 +8,32 @@ from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_core.runnables.history import RunnableWithMessageHistory
+import streamlit as st
+import streamlit.components.v1 as components
+from langchain_core.runnables import RunnableWithMessageHistory
+from langchain_community.chat_message_histories import StreamlitChatMessageHistory
+from langchain.prompts import PromptTemplate
+from langchain.chains import LLMChain
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+def create_translation_chain(llm):
+    translation_prompt = PromptTemplate.from_template("""
+아래 한국어 의학 질문을 영어로 번역해주세요.
+
+다음 규칙을 반드시 따르세요:
+
+1. **의학 용어**는 WHO 또는 국제적으로 공인된 **표준 의학 용어**로 번역할 것
+-> **일반적으로 쓰이는 용어가 아닌 전문적인 의학 용어로 번역하시오.**
+2. **공식 영어 용어가 2가지 이상 예측될 경우**, 가능성이 높은 순으로 3개로 리스트에 넣어 나열할 것 (예: "[ liver cirrhosis , hepatic cirrhosis ]")
+3. **공식 약어가 있는 경우**, 전체 용어를 먼저 쓰고 괄호 안에 약어를 함께 표기할 것 (예: "chronic obstructive pulmonary disease (COPD)")
+4. **리스트에 넣을 단어의 개수는 3개이다.(확률 높은 순)** (예: "what is [ coryza , upper respiratory infection , cold ]?")
+5. 번역 결과는 **영어 한 문장**으로 출력하며, **한국어는 포함하지 말 것**
+
+질문:
+{input}
+""")
+    return LLMChain(llm=llm, prompt=translation_prompt)
 
 @st.cache_resource
 def load_pdf(file_path):
@@ -18,68 +41,101 @@ def load_pdf(file_path):
     return loader.load()
 
 @st.cache_resource
-def create_vector_store(_docs, index_name):  # index_name 인자 추가
+def create_vector_store(_docs):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     split_docs = text_splitter.split_documents(_docs)
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     vectorstore = FAISS.from_documents(split_docs, embeddings)
-    vectorstore.save_local(f"faiss_index/{index_name}")  # 인덱스를 PDF 이름 기반으로 저장
+    vectorstore.save_local("faiss_index")
     return vectorstore
 
 @st.cache_resource
-def get_vectorstore(_docs, index_name):
-    path = f"faiss_index/{index_name}/index.faiss"
-    if os.path.exists(path):
+def get_vectorstore(_docs):
+    if os.path.exists("faiss_index/index.faiss"):
         embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        return FAISS.load_local(f"faiss_index/{index_name}", embeddings, allow_dangerous_deserialization=True)
+        return FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
     else:
-        return create_vector_store(_docs, index_name)
-
+        return create_vector_store(_docs)
+    
 @st.cache_resource
-def initialize_rag_chain(*pdf_paths):
-    all_pages = []
-    for path in pdf_paths:
-        pages = load_pdf(path)
-        all_pages.extend(pages)  # 문서 리스트를 병합
-
-    # PDF 파일명을 합쳐 인덱스 이름 생성 (순서 고려)
-    index_name = "_".join(sorted([
-    os.path.splitext(os.path.basename(path))[0] for path in pdf_paths]))
-
-    vectorstore = get_vectorstore(all_pages, index_name)
+def initialize_rag_chain(pdf_path):
+    pages = load_pdf(pdf_path)
+    vectorstore = get_vectorstore(pages)
     retriever = vectorstore.as_retriever()
-
-
+    
     contextualize_q_system_prompt = """Given a chat history and the latest user question \
     which might reference context in the chat history, formulate a standalone question \
     which can be understood without the chat history. Do NOT answer the question, \
     just reformulate it if needed and otherwise return it as is."""
-
+    
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
         ("system", contextualize_q_system_prompt),
         MessagesPlaceholder("history"),
         ("human", "{input}")
     ])
+    
+    qa_system_prompt = """당신은 의료 분야에 특화된 질문 응답 도우미입니다.
 
-    qa_system_prompt = """You are an assistant for question-answering tasks. \
-    Use the following pieces of retrieved context to answer the question. \
-    If you don't know the answer, just say that you don't know. \
-    Keep the answer perfect. \
-    대답은 한국어로 하고, 존댓말을 써주세요.\
+다음에 주어진 문서 기반 정보를 사용하여 사용자의 질문에 답변해주세요. 문서에 정보가 없는 경우, 모른다고 정중히 말해주세요. 추측하거나 문서에 없는 내용을 만들어내지 마세요.
+---------------
+[답변 지침]
+1. 질문에 대한 **정확한 정의, 정답 여부, 핵심 개념 등 대답**을 먼저 간략히 말하시오.
+2. ** 핵심 **
+    - 핵심 개념의 주요 특징이나 작용 방식을 설명해
 
-    {context}"""
+3. 가능하면 아래처럼 항목을 나눠 설명해. 단, **문서에 기반한 정보만 사용**하고, 없는 정보는 절대 추론하지 말아라.
+    - ① 주요 종류 또는 분류
+    - ② 약물 예시 및 기전
+    - ③ 적응증 및 사용 목적
+    - ④ 부작용, 주의사항, 금기사항 등
+    -> **문서 내용을 기반으로 사실에 근거한 구체적이고 신중한 설명**을 단락을 나눠서 작성해주세요.
+    -> **해당 관련 문서에 있는 내용을 최대한 자세하게 관련된 모든 내용을 깔끔한 형식으로 출력해주세요.**
+    -> 문장을 길게 쓰지 말고 보기 쉽게 풀어 쓰세요. (예: "- 효과가 나타나기까지는 수 주에서 수 개월이 걸릴 수 있음")
+    -> 어려운 의학 용어는 괄호 안에 풀어쓰며, 가능한 WHO 용어를 그대로 사용해주세요.
 
+4. WHO 문서에 없는 내용은 "자료에 따르면 제공되지 않음"이라고 명확히 밝혀라.
+5. 마지막에는 간단한 마무리 멘트를 포함해라. (예: “이상으로 설명을 마칩니다.”)
+---------------
+[출력 형식 예시]
+
+✅ [핵심 답변 문장]
+
+📌 [개념 및 특징 설명]
+
+1️⃣ [내용 분류 1]  
+- 내용
+
+2️⃣ [내용 분류 2]  
+- 내용
+
+3️⃣ [내용 분류 3]  
+- 내용
+
+ℹ️ [추가 주의사항/정보]  
+- 내용
+
+✔️ [마무리 멘트]
+- 내용
+-----------------------
+규칙:
+- **한국어로**, **존댓말**을 사용하여 정중하게 대답하세요.
+- 단, 의학 용어의 경우, 한국어로 답하되, 괄호를 치고 그 안에 대응되는 영어 의료 단어를 적으시오. ex) 모르핀(morphine)
+- 예외적으로 의학 용어가 한국에서 일반적으로 영어로 표기되는 경우 이는 영어(한국어) 순으로 적으시오. ex) DMARDs(질병 수정 항류머티즘 약물) 
+- 문서에 근거가 없는 정보는 절대 상상하거나 생성하지 마세요.
+
+{context}
+"""
+    
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", qa_system_prompt),
         MessagesPlaceholder("history"),
         ("human", "{input}")
     ])
-
-    llm = ChatOpenAI(model="gpt-4o-mini")
+    
     history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-
+    
     return rag_chain
 
 #####################################################################################################################
@@ -92,10 +148,10 @@ def sidebar_menu():
         st.markdown("""
             <style>
             [data-testid="stSidebar"] > div:first-child {
-                padding-top: 0.5rem;
-                padding-right: 0.5rem;
-                padding-left: 0.5rem;
-                padding-bottom: 0.5rem;
+                display: flex;
+                flex-direction: column;
+                height: 100%;
+                padding: 0.5rem;
             }
             div.stButton > button {
                 font-size: 16px;
@@ -150,14 +206,23 @@ def sidebar_menu():
             .chat-context-menu-item:hover {
                 background-color: #f5f5f5;
             }
+            .chat-list-container {
+                flex-grow: 1;  /* 유동적으로 늘어남 */
+                overflow-y: auto;
+                margin-bottom: 1rem;
+            }
+            .sidebar-bottom {
+                margin-top: auto;
+                text-align: right;
+            }
             </style>
         """, unsafe_allow_html=True)
 
+        # -------------- 상단 메뉴 ----------------
         st.markdown("""
             <h1 style='color: #27408b; margin-top: -4rem;'>메뉴</h1>
+            <hr style='margin: -0.5rem 0 1.5rem 0;'>
         """, unsafe_allow_html=True)
-
-        st.markdown("<hr style='margin: -0.5rem 0 1.5rem 0;'>", unsafe_allow_html=True)
 
         if st.button("🏠 홈으로", use_container_width=True):
             st.session_state["page"] = "home"
@@ -171,6 +236,9 @@ def sidebar_menu():
         st.markdown("<hr style='margin: 0.5rem 0 1.5rem 0;'>", unsafe_allow_html=True)
 
         st.markdown("##### 이전 채팅", unsafe_allow_html=True)
+
+        # -------------- 채팅 리스트 ----------------
+        st.markdown("<div class='chat-list-container'>", unsafe_allow_html=True)
 
         components.html("""
         <div id="chat_list_container"></div>
@@ -242,58 +310,17 @@ def sidebar_menu():
 
         setTimeout(loadChatList, 100);
         </script>
-        """, height=500)
+        """, height=150)  # 최소 높이만 잡아줌
 
+        st.markdown("</div>", unsafe_allow_html=True)  # chat-list-container 끝
 
+        # -------------- 하단 버튼 ----------------
         st.markdown("<hr style='margin: 0.5rem 0 1.5rem 0;'>", unsafe_allow_html=True)
 
         if st.button("📄 PDF 보기", use_container_width=True):
             st.session_state["page"] = "pdf_view"
             st.rerun()
-
-        st.markdown("<hr style='margin: 0.5rem 0 1rem 0;'>", unsafe_allow_html=True)
-
-        login_label = "로그아웃" if st.session_state.get("logged_in", False) else "로그인"
-
-        if "login_link_clicked" not in st.session_state:
-            st.session_state["login_link_clicked"] = False
-
-        st.markdown(f"""
-            <p style="
-                text-align: right;
-                margin-top: 0.5rem;
-                margin-bottom: 0.5rem;
-            ">
-                <a href="#" onclick="window.parent.postMessage({{ type: 'LOGIN_CLICK' }}, '*'); return false;"
-                style="
-                    color: #27408b;
-                    text-decoration: underline;
-                    font-size: 14px;
-                    cursor: pointer;
-                ">{login_label}</a>
-            </p>
-        """, unsafe_allow_html=True)
-
-        st.markdown("""
-            <script>
-            window.addEventListener("message", (event) => {
-                if (event.data && event.data.type === "LOGIN_CLICK") {
-                    const streamlitEvent = new CustomEvent("streamlit_login_click");
-                    window.dispatchEvent(streamlitEvent);
-                }
-            });
-
-            window.addEventListener("streamlit_login_click", (event) => {
-                Streamlit.setComponentValue("login_click_event");
-            });
-            </script>
-        """, unsafe_allow_html=True)
-
-        if "login_click_event" in st.session_state:
-            st.session_state.pop("login_click_event")
-            st.session_state["page"] = "login"
-            st.rerun()
-
+    
 def show_home():
     st.markdown("""
         <div style='text-align: center; margin-top: 60px; margin-bottom: 8px;'>
@@ -310,6 +337,7 @@ def show_home():
         st.session_state["page"] = "chat"
         st.session_state["first_question"] = first_question
         st.rerun()
+    
 
 def show_chat():
     st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
@@ -331,9 +359,8 @@ def show_chat():
         </style>
     """, unsafe_allow_html=True)
 
-    pdf_path1 = "./who.pdf"
-    pdf_path2 = "./Healthcare_Vocab.pdf"
-    rag_chain = initialize_rag_chain(pdf_path1, pdf_path2)
+    pdf_path = "./who.pdf"
+    rag_chain = initialize_rag_chain(pdf_path)
 
     chat_history = StreamlitChatMessageHistory(key="chat_messages")
 
@@ -351,15 +378,35 @@ def show_chat():
             "content": "의약품 및 질병에 대해 무엇이든 물어보세요!"
         }]
         if "first_question" in st.session_state:
-            first_q = st.session_state.pop("first_question")
-            st.session_state["messages"].append({
-                "role": "user",
-                "content": first_q
-            })
+            prompt_message = st.session_state.pop("first_question")
+            if prompt_message:
+                st.chat_message("human").write(prompt_message)
 
-    for msg in chat_history.messages:
+            with st.chat_message("ai"):
+                with st.spinner("Thinking..."):
+                    config = {"configurable": {"session_id": "any"}}
+                    # 1. 한국어 질문 → 영어 번역
+                    translation_chain = create_translation_chain(llm)
+                    translated = translation_chain.invoke({"input": prompt_message})
+                    translated_input = translated['text']  # 영어 질문
+
+                    # 2. 영어 질문 → 문서 기반 QA 수행 (답변은 한국어로 생성됨)
+                    response = conversational_rag_chain.invoke(
+                        {"input": translated_input},
+                        config
+                    )
+                    answer = response['answer']
+                    st.write(answer)
+
+                    with st.expander("참고 문서 확인"):
+                        for doc in response['context']:
+                            preview = doc.page_content.strip().replace("\n", " ")[:500]
+                            source = doc.metadata.get("display_source", doc.metadata.get("source", "알 수 없음"))
+                            st.markdown(f"📄 **{source}**\n\n{preview}...")
+
+    for msg in chat_history.messages[2:]:
         st.chat_message(msg.type).write(msg.content)
-
+    
     prompt_message = st.chat_input("질문을 입력하세요", key="chat_input_chat")
     if prompt_message:
         st.chat_message("human").write(prompt_message)
@@ -367,8 +414,14 @@ def show_chat():
         with st.chat_message("ai"):
             with st.spinner("Thinking..."):
                 config = {"configurable": {"session_id": "any"}}
+                # 1. 한국어 질문 → 영어 번역
+                translation_chain = create_translation_chain(llm)
+                translated = translation_chain.invoke({"input": prompt_message})
+                translated_input = translated['text']  # 영어 질문
+
+                # 2. 영어 질문 → 문서 기반 QA 수행 (답변은 한국어로 생성됨)
                 response = conversational_rag_chain.invoke(
-                    {"input": prompt_message},
+                    {"input": translated_input},
                     config
                 )
                 answer = response['answer']
